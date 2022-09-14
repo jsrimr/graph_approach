@@ -30,7 +30,7 @@ class FineTuningModule(pl.LightningModule):
         self.config = config
         self.model = model
         # self.ex_fn1 = nn.Linear(config.model.hidden_dim * 2, 2)
-        self.ex_fn1 = nn.Linear(2, 2)
+        # self.ex_fn1 = nn.Linear(2, 2)
 
         # self.init_weights(self.ex_fn1)
 
@@ -42,15 +42,15 @@ class FineTuningModule(pl.LightningModule):
         self, g_data, ex_data, labels
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        # hidden_states_g = self.model(g_data.z, g_data.pos, g_data.batch)
-        hidden_states_g = self.model(*g_data)  # (batch_size, 1)
-        # hidden_states_ex = self.model(ex_data.z, ex_data.pos, ex_data.batch)
-        hidden_states_ex = self.model(*ex_data) # (batch_size, 1)
-        # hidden_states = self.model(g_data, ex_data, labels)
+        # hidden_states_g = self.model(*g_data)  # (batch_size, 1)
+        # hidden_states_ex = self.model(*ex_data) # (batch_size, 1)
 
-        hidden_states = torch.cat([hidden_states_g, hidden_states_ex], dim=-1)
-        logits = self.ex_fn1(hidden_states)
+        # hidden_states = torch.cat([hidden_states_g, hidden_states_ex], dim=-1)
+        # logits = self.ex_fn1(hidden_states)
 
+        logits = self.model(*g_data, *ex_data)  # TODO : inf 가 나오네
+        # clip logits
+        # logits = torch.clamp(logits, min=-2., max=2.)
         # assert torch.all(g_data.y == ex_data.y)
 
         labels = labels.view(-1,2)  # TODO : 하드코딩 되어있음. 수정 필요.
@@ -82,31 +82,35 @@ class FineTuningModule(pl.LightningModule):
         self.log("val/mae_loss", mae_loss)
         self.log("val/score", mae_loss)
 
-    # def create_param_groups(self) -> List[Dict[str, Any]]:
-    #     """Create parameter groups for the optimizer.
+    def create_param_groups(self) -> List[Dict[str, Any]]:
+        """Create parameter groups for the optimizer.
 
-    #     Transformer-based models are usually optimized by AdamW (weight-decay decoupled
-    #     Adam optimizer). And weight decaying are applied to only weight parameters, not
-    #     bias and layernorm parameters. Hence, this method creates parameter groups which
-    #     contain parameters for weight-decay and ones for non-weight-decay. Using this
-    #     paramter groups, you can separate which parameters should not be decayed from
-    #     entire parameters in this model.
+        Transformer-based models are usually optimized by AdamW (weight-decay decoupled
+        Adam optimizer). And weight decaying are applied to only weight parameters, not
+        bias and layernorm parameters. Hence, this method creates parameter groups which
+        contain parameters for weight-decay and ones for non-weight-decay. Using this
+        paramter groups, you can separate which parameters should not be decayed from
+        entire parameters in this model.
 
-    #     Returns:
-    #         A list of parameter groups.
-    #     """
-    #     do_decay_params, no_decay_params = [], []
-    #     for layer in self.modules():
-    #         for name, param in layer.named_parameters(recurse=False):
-    #             if isinstance(layer, MoTLayerNorm) or name == "bias":
-    #                 no_decay_params.append(param)
-    #             else:
-    #                 do_decay_params.append(param)
+        Returns:
+            A list of parameter groups.
+        """
+        do_decay_params, no_decay_params = [], []
+        n_param = 0
+        for layer in self.modules():
+            for name, param in layer.named_parameters(recurse=False):
+                print(name, param.numel())
+                n_param += param.numel()
+                # if isinstance(layer, MoTLayerNorm) or name == "bias":
+                if name == "bias":
+                    no_decay_params.append(param)
+                else:
+                    do_decay_params.append(param)
 
-    #     return [
-    #         {"params": do_decay_params},
-    #         {"params": no_decay_params, "weight_decay": 0.0},
-    #     ]
+        return [
+            {"params": do_decay_params},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ]
 
     def adjust_learning_rate(self, current_step: int) -> float:
         """Calculate a learning rate scale corresponding to current step.
@@ -160,8 +164,9 @@ class FineTuningModule(pl.LightningModule):
         return (batches // effective_accum) * self.trainer.max_epochs
 
     def configure_optimizers(self) -> Tuple[List[Optimizer], List[Dict[str, Any]]]:
-        # optimizer = AdamW(self.create_param_groups(), **self.config.train.optimizer)
-        optimizer = AdamW(self.parameters(), **self.config.train.optimizer)
+        optimizer = AdamW(self.create_param_groups(), **self.config.train.optimizer)
+        # optimizer = AdamW(self.parameters(), **self.config.train.optimizer)
+        # optimizer = Adam(self.parameters())
         scheduler = LambdaLR(optimizer, self.adjust_learning_rate)
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
 

@@ -33,7 +33,6 @@ from torch_geometric.nn import radius_graph
 class MyDimenet(DimeNetPlusPlus):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # self.lin = torch.nn.Linear(256, 1)
 
     def preprocess(self, z, pos, batch):
          # ground block
@@ -65,17 +64,24 @@ class MyDimenet(DimeNetPlusPlus):
     def forward(self, z, pos, batch, z2=None, pos2=None, batch2=None):
         # Preprocess.
         x, rbf, sbf, idx_kj, idx_ji, P, i = self.preprocess(z, pos, batch)
-        # x2, rbf2, sbf2, idx_kj2, idx_ji2, P2 = self.preprocess(z2, pos2, batch2)
+        x2, rbf2, sbf2, idx_kj2, idx_ji2, P2, i2 = self.preprocess(z2, pos2, batch2)
 
+        final_P = P + P2
         # Interaction blocks.
         for interaction_block, output_block in zip(self.interaction_blocks,
                                                    self.output_blocks[1:]):
-            x = interaction_block(x, rbf, sbf, idx_kj, idx_ji)  # 
+            x = interaction_block(x, rbf, sbf, idx_kj, idx_ji)  # 뭔가 복잡한 차원
+            x2 = interaction_block(x2, rbf2, sbf2, idx_kj2, idx_ji2)  # 뭔가 복잡한 차원
             
-            P += output_block(x, rbf, i)
+            # P += output_block(x, rbf, i)
+            # P2 += output_block(x2, rbf2, i2)
+            # final_P += output_block(x+x2, rbf + rbf2, i)  # 이게 되나? i==i2 이려나-> No. x와 x2 shape 도 다름
+            # final_P += output_block(x, rbf, i) + output_block(x2, rbf2, i2)
+            final_P += output_block(x, rbf, i) + output_block(x2, rbf2, i2)
 
 
-        return P.sum(dim=0) if batch is None else scatter(P, batch, dim=0)
+        # return P.sum(dim=0) if batch is None else scatter(P, batch, dim=0)
+        return final_P.sum(dim=0) if batch is None else scatter(final_P, batch, dim=0)
 
 def main(config: DictConfig):
     # dataset = QM9(osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'QM9'))
@@ -84,7 +90,8 @@ def main(config: DictConfig):
 
     model = MyDimenet(
             hidden_channels=128,
-            out_channels=1,
+            # out_channels=1,
+            out_channels=2,
             num_blocks=4,
             int_emb_size=64,
             basis_emb_size=8,
@@ -98,13 +105,15 @@ def main(config: DictConfig):
             num_after_skip=2,
             num_output_layers=3,
         )
-    model.load_state_dict(torch.load('data/dimenet_pretrained.pth'))
+    # model.load_state_dict(torch.load('data/dimenet_pretrained.pth'))
     model_name = f"{config.train.name}-fold{config.data.fold_index}"
     model_checkpoint = ModelCheckpoint(monitor="val/score", save_weights_only=True)
 
+    # logger=WandbLogger(project="mot-finetuning", name=model_name)
+    # logger.watch(model, log="all", log_freq=100)
     Trainer(
         gpus=config.train.gpus,
-        # logger=WandbLogger(project="mot-finetuning", name=model_name),
+        # logger=logger,
         callbacks=[model_checkpoint, LearningRateMonitor("step")],
         precision=config.train.precision,
         max_epochs=config.train.epochs,

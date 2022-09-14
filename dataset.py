@@ -162,13 +162,13 @@ class FakeQM9(InMemoryDataset):
         super().__init__(root, transform, pre_transform, pre_filter)
         self.data, self.slices = torch.load(self.processed_paths[0])
 
-    def mean(self, target: int) -> float:
-        y = torch.cat([self.get(i).y for i in range(len(self))], dim=0)
-        return float(y[:, target].mean())
+    # def mean(self, target: int) -> float:
+    #     y = torch.cat([self.get(i).y for i in range(len(self))], dim=0)
+    #     return float(y[:, target].mean())
 
-    def std(self, target: int) -> float:
-        y = torch.cat([self.get(i).y for i in range(len(self))], dim=0)
-        return float(y[:, target].std())
+    # def std(self, target: int) -> float:
+    #     y = torch.cat([self.get(i).y for i in range(len(self))], dim=0)
+    #     return float(y[:, target].std())
 
     # def atomref(self, target) -> Optional[torch.Tensor]:
     #     if target in atomrefs:
