@@ -51,22 +51,30 @@ conversion = torch.tensor([
 #     11: [0., 0., 0., 0., 0.],
 # }
 class GDataset(InMemoryDataset):
-    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None):
+    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None, mode='train'):
+        self.mode = mode
         super().__init__(root, transform, pre_transform, pre_filter)
         self.data, self.slices = torch.load(self.processed_paths[0])
 
     @property
     def processed_file_names(self):
-        return 'train_g.pt'
+        if self.mode == 'train':
+            return 'train_g.pt'
+        else:
+            return 'test_g.pt'
 
 class ExDataset(InMemoryDataset):
-    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None):
+    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None, mode='train'):
+        self.mode = mode
         super().__init__(root, transform, pre_transform, pre_filter)
         self.data, self.slices = torch.load(self.processed_paths[0])
 
     @property
     def processed_file_names(self):
-        return 'train_ex.pt'
+        if self.mode == 'train':
+            return 'train_g.pt'
+        else:
+            return 'test_g.pt'
     
 class FakeQM9(InMemoryDataset):
     r"""The QM9 dataset from the `"MoleculeNet: A Benchmark for Molecular
@@ -158,52 +166,30 @@ class FakeQM9(InMemoryDataset):
 
     def __init__(self, root: str, transform: Optional[Callable] = None,
                  pre_transform: Optional[Callable] = None,
-                 pre_filter: Optional[Callable] = None):
+                 pre_filter: Optional[Callable] = None,
+                 mode='train'):
+        self.mode = mode
         super().__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_paths[0])
-
-    # def mean(self, target: int) -> float:
-    #     y = torch.cat([self.get(i).y for i in range(len(self))], dim=0)
-    #     return float(y[:, target].mean())
-
-    # def std(self, target: int) -> float:
-    #     y = torch.cat([self.get(i).y for i in range(len(self))], dim=0)
-    #     return float(y[:, target].std())
-
-    # def atomref(self, target) -> Optional[torch.Tensor]:
-    #     if target in atomrefs:
-    #         out = torch.zeros(100)
-    #         out[torch.tensor([1, 6, 7, 8, 9])] = torch.tensor(atomrefs[target])
-    #         return out.view(-1, 1)
-    #     return None
+        self.data, self.slices = torch.load(self.processed_paths[0])  # TODO : g, ex 파일 나눠서 저장해서 한번에 가져오는 상황이 안됨.
 
     @property
     def raw_file_names(self) -> List[str]:
         try:
             import rdkit  # noqa
-            return ['mol_files', 'train_set.ReorgE.csv', ]
+            if self.mode == "train":
+                return ['mol_files', 'train_set.ReorgE.csv']
+            elif self.mode == "test":
+                return ['mol_files']
         except ImportError:
             return
             # return ['qm9_v3.pt']
 
     @property
-    def processed_file_names(self) -> str:
-        return 'data_v3.pt'
-
-    # def download(self):
-    #     try:
-    #         import rdkit  # noqa
-    #         file_path = download_url(self.raw_url, self.raw_dir)
-    #         extract_zip(file_path, self.raw_dir)
-    #         os.unlink(file_path)
-
-    #         file_path = download_url(self.raw_url2, self.raw_dir)
-    #         os.rename(osp.join(self.raw_dir, '3195404'),
-    #                   osp.join(self.raw_dir, 'uncharacterized.txt'))
-    #     except ImportError:
-    #         path = download_url(self.processed_url, self.raw_dir)
-    #         extract_zip(path, self.raw_dir)
-    #         os.unlink(path)
+    def processed_file_names(self) -> str: # TODO : g, ex 파일 나눠서 저장해서 한번에 가져오는 상황이 안됨.
+        if self.mode == "train":
+            return 'data_v3.pt'
+        else:
+            return 'test_data.pt'
 
     def process(self):
         try:
@@ -232,23 +218,6 @@ class FakeQM9(InMemoryDataset):
 
             torch.save(self.collate(data_list), self.processed_paths[0])
             return
-
-        # types = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'F': 4}
-        types = {el: i for i, el in enumerate(MOLECULAR_ATOMS)}
-        bonds = {BT.SINGLE: 0, BT.DOUBLE: 1, BT.TRIPLE: 2, BT.AROMATIC: 3}
-
-        
-        df = pd.read_csv(self.raw_paths[1], index_col=0)
-        target = df[['Reorg_g', 'Reorg_ex']]
-        target = torch.tensor(target.values, dtype=torch.float)
-
-        # read from mol_files
-        # data_list = []
-        g_data_list = []
-        ex_data_list = []
-        g_list = sorted(Path(self.raw_paths[0]+'/train_set').glob("*_g.mol"))
-        ex_list = sorted(Path(self.raw_paths[0]+'/train_set').glob("*_ex.mol"))
-
         def extract_mol(file :str, i:int) -> Data:
             mol = Chem.MolFromMolFile(file)
 
@@ -308,8 +277,10 @@ class FakeQM9(InMemoryDataset):
             
             # name = mol.GetProp('_Name')
 
-            
-            data = Data(x=x, z=z, pos=pos, edge_index=edge_index,y=target[i], edge_attr=edge_attr)
+            if self.mode == "train":
+                data = Data(x=x, z=z, pos=pos, edge_index=edge_index,y=target[i], edge_attr=edge_attr)
+            else:
+                data = Data(x=x, z=z, pos=pos, edge_index=edge_index, edge_attr=edge_attr)
 
             if self.pre_filter is not None and not self.pre_filter(data):
                 return None
@@ -318,17 +289,45 @@ class FakeQM9(InMemoryDataset):
             
             return data
 
-        for i, (g_file, ex_file) in enumerate(zip(g_list, ex_list)):
-            g_data = extract_mol(str(g_file), i)
-            g_data_list.append(g_data)
-            ex_data = extract_mol(str(ex_file), i)
-            ex_data_list.append(ex_data)
+        types = {el: i for i, el in enumerate(MOLECULAR_ATOMS)}
+        bonds = {BT.SINGLE: 0, BT.DOUBLE: 1, BT.TRIPLE: 2, BT.AROMATIC: 3}
 
-            # y = target[i].unsqueeze(0)
-            # data_list.append(Data(g_data=g_data, ex_data=ex_data, y=y, idx=i))
+        if self.mode == "test":
+            g_data_list = []
+            ex_data_list = []
+            g_list = sorted(Path(self.raw_paths[0]+'/test_set').glob("*_g.mol"))
+            ex_list = sorted(Path(self.raw_paths[0]+'/test_set').glob("*_ex.mol"))
+
+            for i, (g_file, ex_file) in enumerate(zip(g_list, ex_list)):
+                g_data = extract_mol(str(g_file), i)
+                g_data_list.append(g_data)
+                ex_data = extract_mol(str(ex_file), i)
+                ex_data_list.append(ex_data)
+
+            torch.save(self.collate(g_data_list), os.path.dirname(self.processed_paths[0]) + '/test_g.pt')
+            torch.save(self.collate(ex_data_list), os.path.dirname(self.processed_paths[0]) + '/test_ex.pt')
         
-        torch.save(self.collate(g_data_list), os.path.dirname(self.processed_paths[0]) + '/train_g.pt')
-        torch.save(self.collate(ex_data_list), os.path.dirname(self.processed_paths[0]) + '/train_ex.pt')
+        else:           
+            df = pd.read_csv(self.raw_paths[1], index_col=0)
+            target = df[['Reorg_g', 'Reorg_ex']]
+            target = torch.tensor(target.values, dtype=torch.float)
 
-        # torch.save([self.collate(g_data_list), self.collate(ex_data_list)], self.processed_paths[0])
-        # torch.save(self.collate(data_list), self.processed_paths[0])
+            # read from mol_files
+            # data_list = []
+            g_data_list = []
+            ex_data_list = []
+            g_list = sorted(Path(self.raw_paths[0]+'/train_set').glob("*_g.mol"))
+            ex_list = sorted(Path(self.raw_paths[0]+'/train_set').glob("*_ex.mol"))
+
+
+            for i, (g_file, ex_file) in enumerate(zip(g_list, ex_list)):
+                g_data = extract_mol(str(g_file), i)
+                g_data_list.append(g_data)
+                ex_data = extract_mol(str(ex_file), i)
+                ex_data_list.append(ex_data)
+
+                # y = target[i].unsqueeze(0)
+                # data_list.append(Data(g_data=g_data, ex_data=ex_data, y=y, idx=i))
+            
+            torch.save(self.collate(g_data_list), os.path.dirname(self.processed_paths[0]) + '/train_g.pt')
+            torch.save(self.collate(ex_data_list), os.path.dirname(self.processed_paths[0]) + '/train_ex.pt')

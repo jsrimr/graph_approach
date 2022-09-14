@@ -72,13 +72,7 @@ class MyDimenet(DimeNetPlusPlus):
                                                    self.output_blocks[1:]):
             x = interaction_block(x, rbf, sbf, idx_kj, idx_ji)  # 뭔가 복잡한 차원
             x2 = interaction_block(x2, rbf2, sbf2, idx_kj2, idx_ji2)  # 뭔가 복잡한 차원
-            
-            # P += output_block(x, rbf, i)
-            # P2 += output_block(x2, rbf2, i2)
-            # final_P += output_block(x+x2, rbf + rbf2, i)  # 이게 되나? i==i2 이려나-> No. x와 x2 shape 도 다름
-            # final_P += output_block(x, rbf, i) + output_block(x2, rbf2, i2)
             final_P += output_block(x, rbf, i) + output_block(x2, rbf2, i2)
-
 
         # return P.sum(dim=0) if batch is None else scatter(P, batch, dim=0)
         return final_P.sum(dim=0) if batch is None else scatter(final_P, batch, dim=0)
@@ -105,22 +99,23 @@ def main(config: DictConfig):
             num_after_skip=2,
             num_output_layers=3,
         )
-    # model.load_state_dict(torch.load('data/dimenet_pretrained.pth'))
+    model.load_state_dict(torch.load('data/dimenet_pretrained.pth'))
     model_name = f"{config.train.name}-fold{config.data.fold_index}"
     model_checkpoint = ModelCheckpoint(monitor="val/score", save_weights_only=True)
 
-    # logger=WandbLogger(project="mot-finetuning", name=model_name)
+    logger=WandbLogger(project="mot-finetuning", name=model_name)
     # logger.watch(model, log="all", log_freq=100)
     Trainer(
         gpus=config.train.gpus,
-        # logger=logger,
+        logger=logger,
         callbacks=[model_checkpoint, LearningRateMonitor("step")],
         precision=config.train.precision,
         max_epochs=config.train.epochs,
         # amp_backend=amp_backend,
         gradient_clip_val=config.train.max_grad_norm,
         val_check_interval=config.train.validation_interval,
-        accumulate_grad_batches=config.train.accumulate_grads,
+        # accumulate_grad_batches=eval(config.train.accumulate_grads),
+        accumulate_grad_batches={0: 8, 4: 4, 8: 1},
         # resume_from_checkpoint=config.train.resume_from,
         # progress_bar_refresh_rate=1,
         log_every_n_steps=10,

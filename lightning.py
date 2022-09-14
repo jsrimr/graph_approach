@@ -81,6 +81,12 @@ class FineTuningModule(pl.LightningModule):
         self.log("val/mse_loss", mse_loss)
         self.log("val/mae_loss", mae_loss)
         self.log("val/score", mae_loss)
+    
+    def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
+        batch_g, batch_ex = batch
+        logits = self.model(*[batch_g.z, batch_g.pos, batch_g.batch], *[
+                                  batch_ex.z, batch_ex.pos, batch_ex.batch])
+        return logits
 
     def create_param_groups(self) -> List[Dict[str, Any]]:
         """Create parameter groups for the optimizer.
