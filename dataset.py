@@ -50,8 +50,24 @@ conversion = torch.tensor([
 #     ],
 #     11: [0., 0., 0., 0., 0.],
 # }
+class GDataset(InMemoryDataset):
+    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None):
+        super().__init__(root, transform, pre_transform, pre_filter)
+        self.data, self.slices = torch.load(self.processed_paths[0])
 
+    @property
+    def processed_file_names(self):
+        return 'train_g.pt'
 
+class ExDataset(InMemoryDataset):
+    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None):
+        super().__init__(root, transform, pre_transform, pre_filter)
+        self.data, self.slices = torch.load(self.processed_paths[0])
+
+    @property
+    def processed_file_names(self):
+        return 'train_ex.pt'
+    
 class FakeQM9(InMemoryDataset):
     r"""The QM9 dataset from the `"MoleculeNet: A Benchmark for Molecular
     Machine Learning" <https://arxiv.org/abs/1703.00564>`_ paper, consisting of
@@ -227,7 +243,9 @@ class FakeQM9(InMemoryDataset):
         target = torch.tensor(target.values, dtype=torch.float)
 
         # read from mol_files
-        data_list = []
+        # data_list = []
+        g_data_list = []
+        ex_data_list = []
         g_list = sorted(Path(self.raw_paths[0]+'/train_set').glob("*_g.mol"))
         ex_list = sorted(Path(self.raw_paths[0]+'/train_set').glob("*_ex.mol"))
 
@@ -291,8 +309,7 @@ class FakeQM9(InMemoryDataset):
             # name = mol.GetProp('_Name')
 
             
-            data = Data(x=x, z=z, pos=pos, edge_index=edge_index,
-                        edge_attr=edge_attr)
+            data = Data(x=x, z=z, pos=pos, edge_index=edge_index,y=target[i], edge_attr=edge_attr)
 
             if self.pre_filter is not None and not self.pre_filter(data):
                 return None
@@ -303,52 +320,15 @@ class FakeQM9(InMemoryDataset):
 
         for i, (g_file, ex_file) in enumerate(zip(g_list, ex_list)):
             g_data = extract_mol(str(g_file), i)
-            # data_list.append(g_data)
+            g_data_list.append(g_data)
             ex_data = extract_mol(str(ex_file), i)
-            # data_list.append(ex_data)
+            ex_data_list.append(ex_data)
 
-            y = target[i].unsqueeze(0)
-            data_list.append(Data(g_data=g_data, ex_data=ex_data, y=y, idx=i))
+            # y = target[i].unsqueeze(0)
+            # data_list.append(Data(g_data=g_data, ex_data=ex_data, y=y, idx=i))
         
-        torch.save(self.collate(data_list), self.processed_paths[0])
+        torch.save(self.collate(g_data_list), os.path.dirname(self.processed_paths[0]) + '/train_g.pt')
+        torch.save(self.collate(ex_data_list), os.path.dirname(self.processed_paths[0]) + '/train_ex.pt')
 
-
-def parse_mol_structure(data: str) -> Optional[Dict]:
-    """Parse a SDF molecular file to the simple structure dictionary.
-
-    Args:
-        data: The content of SDF molfile.
-
-    Returns:
-        The parsed 3D molecular structure dictionary.
-    """
-    data = data.splitlines()
-    if len(data) < 4:
-        return None
-
-    data = data[3:]
-    num_atoms, num_bonds = int(data[0][:3]), int(data[0][3:6])
-
-    atoms = []
-    for line in data[1: 1 + num_atoms]:
-        x, y, z = float(line[:10]), float(line[10:20]), float(line[20:30])
-        charge = [0, 3, 2, 1, "^", -1, -2, -3][int(line[36:39])]
-        atoms.append([x, y, z, line[31:34].strip(), charge])
-
-    bonds = []
-    for line in data[1 + num_atoms: 1 + num_atoms + num_bonds]:
-        bonds.append([int(line[:3]) - 1, int(line[3:6]) - 1, int(line[6:9])])
-
-    for line in data[1 + num_atoms + num_bonds:]:
-        if not line.startswith("M  CHG") and not line.startswith("M  RAD"):
-            continue
-        for i in range(int(line[6:9])):
-            idx = int(line[10 + 8 * i: 13 + 8 * i]) - 1
-            value = int(line[14 + 8 * i: 17 + 8 * i])
-
-            atoms[idx][4] = (
-                [":", "^", "^^"][value -
-                                 1] if line.startswith("M  RAD") else value
-            )
-
-    return {"atoms": atoms, "bonds": bonds}
+        # torch.save([self.collate(g_data_list), self.collate(ex_data_list)], self.processed_paths[0])
+        # torch.save(self.collate(data_list), self.processed_paths[0])

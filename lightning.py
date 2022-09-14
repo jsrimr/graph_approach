@@ -29,7 +29,8 @@ class FineTuningModule(pl.LightningModule):
         super().__init__()
         self.config = config
         self.model = model
-        self.ex_fn1 = nn.Linear(config.model.hidden_dim * 2, 2)
+        # self.ex_fn1 = nn.Linear(config.model.hidden_dim * 2, 2)
+        self.ex_fn1 = nn.Linear(2, 2)
 
         # self.init_weights(self.ex_fn1)
 
@@ -38,30 +39,45 @@ class FineTuningModule(pl.LightningModule):
             self.model.load_state_dict(state_dict)
 
     def forward(
-        self, batch
+        self, g_data, ex_data, labels
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # batch_g, batch_ex, labels = batch
-        hidden_states_g = self.model(batch.g_data.x, batch.g_data.edge_index, batch.g_data.batch)
-        hidden_states_ex = self.model(batch.ex_data.x, batch.ex_data.edge_index, batch.ex_data.batch)
+
+        # hidden_states_g = self.model(g_data.z, g_data.pos, g_data.batch)
+        hidden_states_g = self.model(*g_data)  # (batch_size, 1)
+        # hidden_states_ex = self.model(ex_data.z, ex_data.pos, ex_data.batch)
+        hidden_states_ex = self.model(*ex_data) # (batch_size, 1)
+        # hidden_states = self.model(g_data, ex_data, labels)
 
         hidden_states = torch.cat([hidden_states_g, hidden_states_ex], dim=-1)
         logits = self.ex_fn1(hidden_states)
 
-        # logits = torch.cat([lambda_g, lambda_ex], dim=-1)  # (B, 2)
+        # assert torch.all(g_data.y == ex_data.y)
 
-        mse_loss = F.mse_loss(logits, batch.y.type_as(logits))
-        mae_loss = F.l1_loss(logits, batch.y.type_as(logits))
+        labels = labels.view(-1,2)  # TODO : 하드코딩 되어있음. 수정 필요.
+        mse_loss = F.mse_loss(logits, labels.type_as(logits))
+        mae_loss = F.l1_loss(logits, labels.type_as(logits))
         return mse_loss, mae_loss
 
     def training_step(self, batch: Dict[str, torch.Tensor], idx: int) -> torch.Tensor:
-        mse_loss, mae_loss = self(batch)
+        # batch_g, batch_ex, labels = batch.g_data, batch.ex_data, batch.y
+        batch_g, batch_ex = batch
+        # implicit 하게 cuda로 옮겨지므로 미리 .to() 할 수 있는 형태로 쪼개 놓아야 함.
+        mse_loss, mae_loss = self([batch_g.z, batch_g.pos, batch_g.batch], [
+                                  batch_ex.z, batch_ex.pos, batch_ex.batch],
+                                  batch_g.y)
         self.log("train/mse_loss", mse_loss)
         self.log("train/mae_loss", mae_loss)
         self.log("train/score", mae_loss)
         return mse_loss
 
     def validation_step(self, batch: Dict[str, torch.Tensor], idx: int):
-        mse_loss, mae_loss = self(batch)
+        # batch_g, batch_ex, labels = batch.g_data, batch.ex_data, batch.y
+        batch_g, batch_ex = batch
+        # implicit 하게 cuda로 옮겨지므로 미리 .to() 할 수 있는 형태로 쪼개 놓아야 함.
+        mse_loss, mae_loss = self([batch_g.z, batch_g.pos, batch_g.batch], [
+                                  batch_ex.z, batch_ex.pos, batch_ex.batch],
+                                  batch_g.y)
+        # mse_loss, mae_loss = self(batch.z, batch.pos, batch.batch)  # implicit 하게 cuda로 옮겨지므로 미리 .to() 할 수 있는 형태로 쪼개 놓아야 함.
         self.log("val/mse_loss", mse_loss)
         self.log("val/mae_loss", mae_loss)
         self.log("val/score", mae_loss)
@@ -151,10 +167,12 @@ class FineTuningModule(pl.LightningModule):
 
 
 class FineTuningDataModule(pl.LightningDataModule):
-    def __init__(self, config: DictConfig, dataset):
+    def __init__(self, config: DictConfig, g_dataset, ex_dataset):
         super().__init__()
         self.config = config
-        self.dataset = dataset
+        # self.dataset = dataset
+        self.g_dataset = g_dataset
+        self.ex_dataset = ex_dataset
 
     def setup(self, stage: Optional[str] = None):
         # fine same idx data and concat
@@ -164,16 +182,18 @@ class FineTuningDataModule(pl.LightningDataModule):
         # for data in self.dataset:
         #     data_group[data.idx].append(data.y)
         # self.data_group = np.array(data_group)
-
+        self.dataset = list(zip(self.g_dataset, self.ex_dataset))
 
         # TODO : 전부 train_dataset 으로 활용하는 방법 찾기
         # Split the structure file list into k-folds. Note that the splits will be same
         # because of the random seed fixing.
-        kfold = KFold(self.config.data.num_folds, shuffle=True, random_state=42)
-        train_val_sets = list(kfold.split(self.dataset))[self.config.data.fold_index]
+        kfold = KFold(self.config.data.num_folds,
+                      shuffle=True, random_state=42)
+        train_val_sets = list(kfold.split(self.dataset))[
+            self.config.data.fold_index]
 
-        self.train_dataset = self.dataset[train_val_sets[0]]
-        self.val_dataset = self.dataset[train_val_sets[1]]
+        self.train_dataset = [self.dataset[idx] for idx in train_val_sets[0]]
+        self.val_dataset = [self.dataset[idx] for idx in train_val_sets[1]]
         # train_dataset = self.data_group[train_val_sets[0]]
         # val_dataset = self.data_group[train_val_sets[1]]
 
