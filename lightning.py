@@ -25,33 +25,23 @@ except ModuleNotFoundError:
 
 
 class FineTuningModule(pl.LightningModule):
-    def __init__(self, config: DictConfig, model):
+    def __init__(self, config: DictConfig, models):
         super().__init__()
         self.config = config
-        self.model = model
-        # self.ex_fn1 = nn.Linear(config.model.hidden_dim * 2, 2)
-        # self.ex_fn1 = nn.Linear(2, 2)
-
-        # self.init_weights(self.ex_fn1)
-
-        if self.config.model.pretrained_model_path is not None:
-            state_dict = torch.load(self.config.model.pretrained_model_path)
-            self.model.load_state_dict(state_dict)
+        self.Eg, self.Eex = models
 
     def forward(
         self, g_data, ex_data, labels
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        # hidden_states_g = self.model(*g_data)  # (batch_size, 1)
-        # hidden_states_ex = self.model(*ex_data) # (batch_size, 1)
+        Eg_excited = self.Eg(*ex_data)  # TODO : inf 가 나오네
+        Eg_ground = self.Eg(*g_data)
+        Eex_ground = self.Eex(*g_data)
+        Eex_excited = self.Eex(*ex_data)
 
-        # hidden_states = torch.cat([hidden_states_g, hidden_states_ex], dim=-1)
-        # logits = self.ex_fn1(hidden_states)
-
-        logits = self.model(*g_data, *ex_data)  # TODO : inf 가 나오네
-        # clip logits
-        # logits = torch.clamp(logits, min=-2., max=2.)
-        # assert torch.all(g_data.y == ex_data.y)
+        lambda_g = Eg_excited - Eg_ground
+        lambda_ex = Eex_excited - Eex_ground
+        logits = torch.cat([lambda_g, lambda_ex], dim=1)
 
         labels = labels.view(-1,2)  # TODO : 하드코딩 되어있음. 수정 필요.
         mse_loss = F.mse_loss(logits, labels.type_as(logits))

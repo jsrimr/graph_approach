@@ -62,6 +62,8 @@ class MyDimenet(DimeNetPlusPlus):
         return x, rbf, sbf, idx_kj, idx_ji, P, i
 
     def forward(self, z, pos, batch, z2=None, pos2=None, batch2=None):
+        # return lambda_g or lambda_e
+
         # Preprocess.
         x, rbf, sbf, idx_kj, idx_ji, P, i = self.preprocess(z, pos, batch)
         x2, rbf2, sbf2, idx_kj2, idx_ji2, P2, i2 = self.preprocess(z2, pos2, batch2)
@@ -82,24 +84,28 @@ def main(config: DictConfig):
     g_dataset = GDataset(config.data.path)
     ex_dataset = ExDataset(config.data.path)
 
-    model = MyDimenet(
-            hidden_channels=128,
-            # out_channels=1,
-            out_channels=2,
-            num_blocks=4,
-            int_emb_size=64,
-            basis_emb_size=8,
-            out_emb_channels=256,
-            num_spherical=7,
-            num_radial=6,
-            cutoff=5.0,
-            max_num_neighbors=32,
-            envelope_exponent=5,
-            num_before_skip=1,
-            num_after_skip=2,
-            num_output_layers=3,
-        )
-    model.load_state_dict(torch.load('data/dimenet_pretrained.pth'))
+    models = []
+    for _ in range(2):
+        model = DimeNetPlusPlus(
+                hidden_channels=128,
+                out_channels=1,
+                # out_channels=2,
+                num_blocks=4,
+                int_emb_size=64,
+                basis_emb_size=8,
+                out_emb_channels=256,
+                num_spherical=7,
+                num_radial=6,
+                cutoff=5.0,
+                max_num_neighbors=32,
+                envelope_exponent=5,
+                num_before_skip=1,
+                num_after_skip=2,
+                num_output_layers=3,
+            )
+        # model.load_state_dict(torch.load('data/dimenet_pretrained.pth'))
+        models.append(model)
+
     model_name = f"{config.train.name}-fold{config.data.fold_index}"
     model_checkpoint = ModelCheckpoint(monitor="val/score", save_weights_only=True)
 
@@ -114,12 +120,12 @@ def main(config: DictConfig):
         # amp_backend=amp_backend,
         gradient_clip_val=config.train.max_grad_norm,
         val_check_interval=config.train.validation_interval,
-        # accumulate_grad_batches=eval(config.train.accumulate_grads),
-        accumulate_grad_batches={0: 8, 4: 4, 8: 1},
+        accumulate_grad_batches=config.train.accumulate_grads,
+        # accumulate_grad_batches={0: 8, 4: 4, 8: 1},
         # resume_from_checkpoint=config.train.resume_from,
         # progress_bar_refresh_rate=1,
         log_every_n_steps=10,
-    ).fit(FineTuningModule(config, model), datamodule=FineTuningDataModule(config, g_dataset, ex_dataset))
+    ).fit(FineTuningModule(config, models), datamodule=FineTuningDataModule(config, g_dataset, ex_dataset))
 
     model = FineTuningModule.load_from_checkpoint(
         model_checkpoint.best_model_path, config=config
