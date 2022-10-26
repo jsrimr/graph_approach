@@ -20,14 +20,14 @@ from torch_geometric.data import (
 
 MOLECULAR_ATOMS = ['Br', 'I', 'N', 'P', 'C',
                    'Cl', 'F', 'Si', 'S', 'B', 'H', 'O']
-HAR2EV = 27.211386246
-KCALMOL2EV = 0.04336414
+# HAR2EV = 27.211386246
+# KCALMOL2EV = 0.04336414
 
 # target 만들때 사용되는데, 의미는 모르겠음
-conversion = torch.tensor([
-    1., 1., HAR2EV, HAR2EV, HAR2EV, 1., HAR2EV, HAR2EV, HAR2EV, HAR2EV, HAR2EV,
-    1., KCALMOL2EV, KCALMOL2EV, KCALMOL2EV, KCALMOL2EV, 1., 1., 1.
-])
+# conversion = torch.tensor([
+#     1., 1., HAR2EV, HAR2EV, HAR2EV, 1., HAR2EV, HAR2EV, HAR2EV, HAR2EV, HAR2EV,
+#     1., KCALMOL2EV, KCALMOL2EV, KCALMOL2EV, KCALMOL2EV, 1., 1., 1.
+# ])
 
 # # target 만들 때 사용
 # atomrefs = {
@@ -72,9 +72,9 @@ class ExDataset(InMemoryDataset):
     @property
     def processed_file_names(self):
         if self.mode == 'train':
-            return 'train_g.pt'
+            return 'train_ex.pt'
         else:
-            return 'test_g.pt'
+            return 'test_ex.pt'
     
 class FakeQM9(InMemoryDataset):
     r"""The QM9 dataset from the `"MoleculeNet: A Benchmark for Molecular
@@ -277,7 +277,7 @@ class FakeQM9(InMemoryDataset):
             
             # name = mol.GetProp('_Name')
 
-            if self.mode == "train":
+            if self.mode == "train":  # 쓸데없이 z 가 들어간건가?
                 data = Data(x=x, z=z, pos=pos, edge_index=edge_index,y=target[i], edge_attr=edge_attr)
             else:
                 data = Data(x=x, z=z, pos=pos, edge_index=edge_index, edge_attr=edge_attr)

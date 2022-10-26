@@ -20,48 +20,9 @@ from dataset import FakeQM9
 # from modeling import MoTConfig, MoTLayerNorm, MoTModel
 
 try:
-    # from apex.optimizers import FusedAdam as AdamW
-    # import Adam
-    from torch.optim import Adam as AdamW
+    from apex.optimizers import FusedAdam as AdamW
 except ModuleNotFoundError:
     from torch.optim import AdamW
-
-
-class Predictor(nn.Module):
-
-    def __init__(self):
-        super(Predictor, self).__init__()
-
-        self.layers_stack = nn.Sequential(
-            nn.Linear(256 * 1 * 2, 512), nn.SiLU(), nn.Dropout(0.5),
-            nn.Linear(512, 512), nn.SiLU(), nn.Dropout(0.5),
-            nn.Linear(512, 512), nn.SiLU(), nn.Dropout(0.5),
-        )
-        self.layers_final = nn.Linear(512, 1, bias=False)
-
-    def reset_params(self):
-        for layer in self.layers_stack:
-            if isinstance(layer, nn.Linear):
-                glorot_orthogonal(layer.weight)
-        glorot_orthogonal(self.layers_final.weight)
-
-    def forward(self, out_g, out_ex):
-        P = 0
-        # for i in range(len(out_g)): # 제출 당시 코드 오류로 len:5 만 사용
-        for i in range(5):
-            with out_g[i].local_scope():
-                with out_ex[i].local_scope():
-                    out_g[i].ndata['t'] = torch.cat(
-                        [out_g[i].ndata['t'] + out_ex[i].ndata['t'], out_g[i].ndata['t'] - out_ex[i].ndata['t']], dim=1)
-                    out_g[i].ndata['t'] = self.layers_stack(
-                        out_g[i].ndata['t'])
-                    out_g[i].ndata['t'] = self.layers_final(
-                        out_g[i].ndata['t'])
-                    P_val = dgl.readout_nodes(out_g[i], 't', op='sum')
-
-            P += P_val
-
-        return P.squeeze(-1)
 
 
 class FineTuningModule(pl.LightningModule):
@@ -71,7 +32,7 @@ class FineTuningModule(pl.LightningModule):
         # self.Eg, self.Eex = models
         self.model = model
         self.mlp = nn.Sequential(
-            nn.Linear(256, 64),
+            nn.Linear(1024, 64),
             nn.SiLU(),
             nn.Linear(64, 2),
         )
@@ -82,7 +43,7 @@ class FineTuningModule(pl.LightningModule):
         g = self.model(*g_data)
         ex = self.model(*ex_data)
 
-        logits = self.mlp(torch.cat([g, ex], dim=1))  # 왜 370,128 이지?
+        logits = self.mlp(torch.cat([g+ex, g - ex], dim=1))  # 왜 370,128 이지?
 
         labels = labels.view(-1, 2)  # TODO : 하드코딩 되어있음. 수정 필요.
         mse_loss = F.mse_loss(logits, labels.type_as(logits))
@@ -138,7 +99,6 @@ class FineTuningModule(pl.LightningModule):
             for name, param in layer.named_parameters(recurse=False):
                 print(name, param.numel())
                 n_param += param.numel()
-                # if isinstance(layer, MoTLayerNorm) or name == "bias":
                 if name == "bias":
                     no_decay_params.append(param)
                 else:

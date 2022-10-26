@@ -9,7 +9,7 @@ from torch_geometric.nn.inits import glorot_orthogonal
 from dataset import ExDataset, FakeQM9, GDataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import DimeNet, DimeNetPlusPlus
-from torch_geometric.nn.models.dimenet import OutputPPBlock
+# from torch_geometric.nn.models.dimenet import OutputPPBlock
 
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
@@ -26,11 +26,6 @@ try:
 except ModuleNotFoundError:
     amp_backend = "native"
 
-# parser = argparse.ArgumentParser()
-# parser.add_argument('--use_dimenet_plus_plus', action='store_true')
-# args = parser.parse_args()
-
-# Model = DimeNetPlusPlus if args.use_dimenet_plus_plus else DimeNet
 from torch_scatter import scatter
 from torch_geometric.nn import radius_graph
 
@@ -44,29 +39,28 @@ class MyOutputPPBlock(torch.nn.Module):
         self.lin_rbf = Linear(num_radial, hidden_channels, bias=False)
 
         # The up-projection layer:
-        # self.lin_up = Linear(hidden_channels, out_emb_channels, bias=False)
-        # self.lins = torch.nn.ModuleList()
-        # for _ in range(num_layers):
-        #     self.lins.append(Linear(out_emb_channels, out_emb_channels))
+        self.lin_up = Linear(hidden_channels, out_emb_channels, bias=False)
+        self.lins = torch.nn.ModuleList()
+        for _ in range(num_layers):
+            self.lins.append(Linear(out_emb_channels, out_emb_channels))
         # self.lin = Linear(out_emb_channels, out_channels, bias=False)
 
         self.reset_parameters()
 
     def reset_parameters(self):
         glorot_orthogonal(self.lin_rbf.weight, scale=2.0)
-        # glorot_orthogonal(self.lin_up.weight, scale=2.0)
-        # for lin in self.lins:
-        #     glorot_orthogonal(lin.weight, scale=2.0)
-        #     lin.bias.data.fill_(0)
+        glorot_orthogonal(self.lin_up.weight, scale=2.0)
+        for lin in self.lins:
+            glorot_orthogonal(lin.weight, scale=2.0)
+            lin.bias.data.fill_(0)
 
     def forward(self, x, rbf, i, num_nodes=None):
         x = self.lin_rbf(rbf) * x
         x = scatter(x, i, dim=0, dim_size=num_nodes)
+        x = self.lin_up(x)
+        for lin in self.lins:
+            x = self.act(lin(x))
         return x
-        # x = self.lin_up(x)
-        # for lin in self.lins:
-        #     x = self.act(lin(x))
-        # return x
         # return self.lin(x)
 
 
@@ -74,8 +68,11 @@ class MyDimenet(DimeNetPlusPlus):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.output_block = MyOutputPPBlock(kwargs['num_radial'], kwargs['hidden_channels'], kwargs['out_emb_channels'],
-                            kwargs['out_channels'], kwargs['num_output_layers'], SiLU())
+        self.output_blocks = torch.nn.ModuleList([
+            MyOutputPPBlock(kwargs['num_radial'], kwargs['hidden_channels'], kwargs['out_emb_channels'],
+                          kwargs['out_channels'], kwargs['num_output_layers'], SiLU())
+            for _ in range(kwargs['num_blocks'] + 1)
+        ])
             
 
         self.reset_parameters()
@@ -114,18 +111,17 @@ class MyDimenet(DimeNetPlusPlus):
         x, rbf, sbf, idx_kj, idx_ji, P, i = self.preprocess(z, pos, batch)
 
         # Interaction blocks.
-        # result = []
-        for interaction_block, _ in zip(self.interaction_blocks,
+        result = []
+        for interaction_block, output_block in zip(self.interaction_blocks,
                                                    self.output_blocks[1:]):
             # x는 각 edge의 feature를 나타낸다.
             x = interaction_block(x, rbf, sbf, idx_kj, idx_ji)
             # dropout
-            # x = F.dropout(x, p=0.5, training=self.training)
+            x = F.dropout(x, p=0.5, training=self.training)
             # P += output_block(x, rbf, i)
-            # p = output_block(x, rbf, i)
+            result.append(scatter(output_block(x, rbf, i), batch, dim=0))
         
-        out = self.output_block(x, rbf, i)
-        return scatter(out, batch, dim=0, reduce='mean')
+        return torch.cat(result, dim=-1)
 
 
 def main(config: DictConfig):
@@ -133,21 +129,17 @@ def main(config: DictConfig):
     g_dataset = GDataset(config.data.path)
     ex_dataset = ExDataset(config.data.path)
 
-    # models = []
-    # for _ in range(2):
     model = MyDimenet(
         hidden_channels=128,
-        out_channels=1,
-        # out_channels=2,
+        out_channels=1, # 상관없음. 안쓰임.
         num_blocks=4,
         int_emb_size=64,
         basis_emb_size=8,
-        out_emb_channels=256,
+        out_emb_channels=128,
         num_spherical=7,
         num_radial=6,
         cutoff=5.0,
         max_num_neighbors=32,
-        # max_num_neighbors=6,
         envelope_exponent=5,
         num_before_skip=1,
         num_after_skip=2,
@@ -170,7 +162,7 @@ def main(config: DictConfig):
         max_epochs=config.train.epochs,
         amp_backend=amp_backend,
         gradient_clip_val=config.train.max_grad_norm,
-        # val_check_interval=config.train.validation_interval,
+        val_check_interval=config.train.validation_interval,
         accumulate_grad_batches=config.train.accumulate_grads,
         # accumulate_grad_batches={0: 8, 4: 4, 8: 1},
         # resume_from_checkpoint=config.train.resume_from,
