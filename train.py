@@ -44,28 +44,29 @@ class MyOutputPPBlock(torch.nn.Module):
         self.lin_rbf = Linear(num_radial, hidden_channels, bias=False)
 
         # The up-projection layer:
-        self.lin_up = Linear(hidden_channels, out_emb_channels, bias=False)
-        self.lins = torch.nn.ModuleList()
-        for _ in range(num_layers):
-            self.lins.append(Linear(out_emb_channels, out_emb_channels))
+        # self.lin_up = Linear(hidden_channels, out_emb_channels, bias=False)
+        # self.lins = torch.nn.ModuleList()
+        # for _ in range(num_layers):
+        #     self.lins.append(Linear(out_emb_channels, out_emb_channels))
         # self.lin = Linear(out_emb_channels, out_channels, bias=False)
 
         self.reset_parameters()
 
     def reset_parameters(self):
         glorot_orthogonal(self.lin_rbf.weight, scale=2.0)
-        glorot_orthogonal(self.lin_up.weight, scale=2.0)
-        for lin in self.lins:
-            glorot_orthogonal(lin.weight, scale=2.0)
-            lin.bias.data.fill_(0)
+        # glorot_orthogonal(self.lin_up.weight, scale=2.0)
+        # for lin in self.lins:
+        #     glorot_orthogonal(lin.weight, scale=2.0)
+        #     lin.bias.data.fill_(0)
 
     def forward(self, x, rbf, i, num_nodes=None):
         x = self.lin_rbf(rbf) * x
         x = scatter(x, i, dim=0, dim_size=num_nodes)
-        x = self.lin_up(x)
-        for lin in self.lins:
-            x = self.act(lin(x))
         return x
+        # x = self.lin_up(x)
+        # for lin in self.lins:
+        #     x = self.act(lin(x))
+        # return x
         # return self.lin(x)
 
 
@@ -73,11 +74,9 @@ class MyDimenet(DimeNetPlusPlus):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.output_blocks = torch.nn.ModuleList([
-            MyOutputPPBlock(kwargs['num_radial'], kwargs['hidden_channels'], kwargs['out_emb_channels'],
+        self.output_block = MyOutputPPBlock(kwargs['num_radial'], kwargs['hidden_channels'], kwargs['out_emb_channels'],
                             kwargs['out_channels'], kwargs['num_output_layers'], SiLU())
-            for _ in range(kwargs['num_blocks'] + 1)
-        ])
+            
 
         self.reset_parameters()
 
@@ -103,8 +102,8 @@ class MyDimenet(DimeNetPlusPlus):
         sbf = self.sbf(dist, angle, idx_kj)
 
         # Embedding block.
-        x = self.emb(z, rbf, i, j)
-        P = self.output_blocks[0](x, rbf, i, num_nodes=pos.size(0))
+        x = self.emb(z, rbf, i, j)  # 여기서 왜 370개 노드가 4238개가 되는걸까 -> edge 개수만큼
+        P = self.output_blocks[0](x, rbf, i, num_nodes=pos.size(0)) # 다시 노드개수로 압축
 
         return x, rbf, sbf, idx_kj, idx_ji, P, i
 
@@ -115,18 +114,18 @@ class MyDimenet(DimeNetPlusPlus):
         x, rbf, sbf, idx_kj, idx_ji, P, i = self.preprocess(z, pos, batch)
 
         # Interaction blocks.
-        result = []
-        for interaction_block, output_block in zip(self.interaction_blocks,
+        # result = []
+        for interaction_block, _ in zip(self.interaction_blocks,
                                                    self.output_blocks[1:]):
             # x는 각 edge의 feature를 나타낸다.
             x = interaction_block(x, rbf, sbf, idx_kj, idx_ji)
             # dropout
-            x = F.dropout(x, p=0.5, training=self.training)
+            # x = F.dropout(x, p=0.5, training=self.training)
             # P += output_block(x, rbf, i)
-            p = output_block(x, rbf, i)
-            result.append(scatter(p, batch, dim=0))
-
-        return torch.cat(result, dim=-1)
+            # p = output_block(x, rbf, i)
+        
+        out = self.output_block(x, rbf, i)
+        return scatter(out, batch, dim=0, reduce='mean')
 
 
 def main(config: DictConfig):
@@ -143,7 +142,7 @@ def main(config: DictConfig):
         num_blocks=4,
         int_emb_size=64,
         basis_emb_size=8,
-        out_emb_channels=128,
+        out_emb_channels=256,
         num_spherical=7,
         num_radial=6,
         cutoff=5.0,
@@ -161,17 +160,17 @@ def main(config: DictConfig):
     model_checkpoint = ModelCheckpoint(
         monitor="val/score", save_weights_only=True)
 
-    # logger=WandbLogger(project="mot-finetuning", name=model_name)
+    logger=WandbLogger(project="mot-finetuning", name=model_name)
     # logger.watch(model, log="all", log_freq=100)
     Trainer(
         gpus=config.train.gpus,
-        # logger=logger,
+        logger=logger,
         callbacks=[model_checkpoint, LearningRateMonitor("step")],
         precision=config.train.precision,
         max_epochs=config.train.epochs,
         amp_backend=amp_backend,
         gradient_clip_val=config.train.max_grad_norm,
-        val_check_interval=config.train.validation_interval,
+        # val_check_interval=config.train.validation_interval,
         accumulate_grad_batches=config.train.accumulate_grads,
         # accumulate_grad_batches={0: 8, 4: 4, 8: 1},
         # resume_from_checkpoint=config.train.resume_from,

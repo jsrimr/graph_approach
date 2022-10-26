@@ -13,6 +13,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 # from torch.utils.data import DataLoader, Dataset
 from torch_geometric.loader import DataLoader
+from torch_geometric.nn.inits import glorot_orthogonal
 
 from dataset import FakeQM9
 # from encoding import MolecularEncoder
@@ -26,6 +27,43 @@ except ModuleNotFoundError:
     from torch.optim import AdamW
 
 
+class Predictor(nn.Module):
+
+    def __init__(self):
+        super(Predictor, self).__init__()
+
+        self.layers_stack = nn.Sequential(
+            nn.Linear(256 * 1 * 2, 512), nn.SiLU(), nn.Dropout(0.5),
+            nn.Linear(512, 512), nn.SiLU(), nn.Dropout(0.5),
+            nn.Linear(512, 512), nn.SiLU(), nn.Dropout(0.5),
+        )
+        self.layers_final = nn.Linear(512, 1, bias=False)
+
+    def reset_params(self):
+        for layer in self.layers_stack:
+            if isinstance(layer, nn.Linear):
+                glorot_orthogonal(layer.weight)
+        glorot_orthogonal(self.layers_final.weight)
+
+    def forward(self, out_g, out_ex):
+        P = 0
+        # for i in range(len(out_g)): # 제출 당시 코드 오류로 len:5 만 사용
+        for i in range(5):
+            with out_g[i].local_scope():
+                with out_ex[i].local_scope():
+                    out_g[i].ndata['t'] = torch.cat(
+                        [out_g[i].ndata['t'] + out_ex[i].ndata['t'], out_g[i].ndata['t'] - out_ex[i].ndata['t']], dim=1)
+                    out_g[i].ndata['t'] = self.layers_stack(
+                        out_g[i].ndata['t'])
+                    out_g[i].ndata['t'] = self.layers_final(
+                        out_g[i].ndata['t'])
+                    P_val = dgl.readout_nodes(out_g[i], 't', op='sum')
+
+            P += P_val
+
+        return P.squeeze(-1)
+
+
 class FineTuningModule(pl.LightningModule):
     def __init__(self, config: DictConfig, model):
         super().__init__()
@@ -33,8 +71,8 @@ class FineTuningModule(pl.LightningModule):
         # self.Eg, self.Eex = models
         self.model = model
         self.mlp = nn.Sequential(
-            nn.Linear(1024, 64),
-            nn.ReLU(),
+            nn.Linear(256, 64),
+            nn.SiLU(),
             nn.Linear(64, 2),
         )
 
@@ -43,20 +81,10 @@ class FineTuningModule(pl.LightningModule):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         g = self.model(*g_data)
         ex = self.model(*ex_data)
-        logits = self.mlp(torch.cat([g, ex], dim=1))
 
-        
-        # Eg_excited = self.Eg(*ex_data)  # TODO : inf 가 나오네
-        # Eg_ground = self.Eg(*g_data)
-        # Eex_ground = self.Eex(*g_data)
-        # Eex_excited = self.Eex(*ex_data)
+        logits = self.mlp(torch.cat([g, ex], dim=1))  # 왜 370,128 이지?
 
-        # lambda_g = Eg_excited - Eg_ground
-        # lambda_ex = Eex_ground - Eex_excited
-        # logits = torch.cat([Eg_excited, Eex_ground], dim=1)
-        # logits = torch.cat([lambda_g, lambda_ex], dim=1)
-
-        labels = labels.view(-1,2)  # TODO : 하드코딩 되어있음. 수정 필요.
+        labels = labels.view(-1, 2)  # TODO : 하드코딩 되어있음. 수정 필요.
         mse_loss = F.mse_loss(logits, labels.type_as(logits))
         mae_loss = F.l1_loss(logits, labels.type_as(logits))
         return mse_loss, mae_loss
@@ -84,11 +112,11 @@ class FineTuningModule(pl.LightningModule):
         self.log("val/mse_loss", mse_loss)
         self.log("val/mae_loss", mae_loss)
         self.log("val/score", mae_loss)
-    
+
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
         batch_g, batch_ex = batch
         logits = self.model(*[batch_g.z, batch_g.pos, batch_g.batch], *[
-                                  batch_ex.z, batch_ex.pos, batch_ex.batch])
+            batch_ex.z, batch_ex.pos, batch_ex.batch])
         return logits
 
     def create_param_groups(self) -> List[Dict[str, Any]]:
@@ -173,7 +201,8 @@ class FineTuningModule(pl.LightningModule):
         return (batches // effective_accum) * self.trainer.max_epochs
 
     def configure_optimizers(self) -> Tuple[List[Optimizer], List[Dict[str, Any]]]:
-        optimizer = AdamW(self.create_param_groups(), **self.config.train.optimizer)
+        optimizer = AdamW(self.create_param_groups(), **
+                          self.config.train.optimizer)
         # optimizer = AdamW(self.parameters(), **self.config.train.optimizer)
         # optimizer = Adam(self.parameters())
         scheduler = LambdaLR(optimizer, self.adjust_learning_rate)
