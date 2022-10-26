@@ -19,29 +19,42 @@ from dataset import FakeQM9
 # from modeling import MoTConfig, MoTLayerNorm, MoTModel
 
 try:
-    from apex.optimizers import FusedAdam as AdamW
+    # from apex.optimizers import FusedAdam as AdamW
+    # import Adam
+    from torch.optim import Adam as AdamW
 except ModuleNotFoundError:
     from torch.optim import AdamW
 
 
 class FineTuningModule(pl.LightningModule):
-    def __init__(self, config: DictConfig, models):
+    def __init__(self, config: DictConfig, model):
         super().__init__()
         self.config = config
-        self.Eg, self.Eex = models
+        # self.Eg, self.Eex = models
+        self.model = model
+        self.mlp = nn.Sequential(
+            nn.Linear(1024, 64),
+            nn.ReLU(),
+            nn.Linear(64, 2),
+        )
 
     def forward(
         self, g_data, ex_data, labels
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        g = self.model(*g_data)
+        ex = self.model(*ex_data)
+        logits = self.mlp(torch.cat([g, ex], dim=1))
 
-        Eg_excited = self.Eg(*ex_data)  # TODO : inf 가 나오네
-        Eg_ground = self.Eg(*g_data)
-        Eex_ground = self.Eex(*g_data)
-        Eex_excited = self.Eex(*ex_data)
+        
+        # Eg_excited = self.Eg(*ex_data)  # TODO : inf 가 나오네
+        # Eg_ground = self.Eg(*g_data)
+        # Eex_ground = self.Eex(*g_data)
+        # Eex_excited = self.Eex(*ex_data)
 
-        lambda_g = Eg_excited - Eg_ground
-        lambda_ex = Eex_excited - Eex_ground
-        logits = torch.cat([lambda_g, lambda_ex], dim=1)
+        # lambda_g = Eg_excited - Eg_ground
+        # lambda_ex = Eex_ground - Eex_excited
+        # logits = torch.cat([Eg_excited, Eex_ground], dim=1)
+        # logits = torch.cat([lambda_g, lambda_ex], dim=1)
 
         labels = labels.view(-1,2)  # TODO : 하드코딩 되어있음. 수정 필요.
         mse_loss = F.mse_loss(logits, labels.type_as(logits))
@@ -246,6 +259,6 @@ class FineTuningDataModule(pl.LightningDataModule):
             batch_size=self.config.train.batch_size,
             num_workers=self.num_dataloader_workers,
             # collate_fn=self.dataloader_collate_fn,
-            drop_last=True,
+            # drop_last=True,
             persistent_workers=True,
         )
