@@ -10,7 +10,7 @@ from omegaconf import DictConfig
 from sklearn.model_selection import KFold
 from torch.nn import functional as F
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 # from torch.utils.data import DataLoader, Dataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn.inits import glorot_orthogonal
@@ -32,7 +32,7 @@ class FineTuningModule(pl.LightningModule):
         # self.Eg, self.Eex = models
         self.model = model
         self.mlp = nn.Sequential(
-            nn.Linear(1024, 64),
+            nn.Linear(512, 64),
             nn.SiLU(),
             nn.Linear(64, 2),
         )
@@ -43,7 +43,7 @@ class FineTuningModule(pl.LightningModule):
         g = self.model(*g_data)
         ex = self.model(*ex_data)
 
-        logits = self.mlp(torch.cat([g+ex, g - ex], dim=1))  # 왜 370,128 이지?
+        logits = self.mlp(torch.cat([g - ex], dim=1))  # 왜 370,128 이지?
 
         labels = labels.view(-1, 2)  # TODO : 하드코딩 되어있음. 수정 필요.
         mse_loss = F.mse_loss(logits, labels.type_as(logits))
@@ -80,6 +80,18 @@ class FineTuningModule(pl.LightningModule):
             batch_ex.z, batch_ex.pos, batch_ex.batch])
         return logits
 
+    # def adjust_learning_rate(self, steps: int) -> float:
+        
+    #     if steps < self.config.train.warmup_steps:
+    #         return float(steps) / float(max(1, self.config.train.warmup_steps))
+        
+    #     total_steps = self.config.train.epochs * len(self.trainer.train_dataloader())
+    #     return max(
+    #         0.0,
+    #         float(total_steps - steps)
+    #         / float(max(1, total_steps - self.config.train.warmup_steps)),
+    #     )
+
     def create_param_groups(self) -> List[Dict[str, Any]]:
         """Create parameter groups for the optimizer.
 
@@ -109,64 +121,15 @@ class FineTuningModule(pl.LightningModule):
             {"params": no_decay_params, "weight_decay": 0.0},
         ]
 
-    def adjust_learning_rate(self, current_step: int) -> float:
-        """Calculate a learning rate scale corresponding to current step.
-
-        MoT pretraining uses a linear learning rate decay with warmups. This method
-        calculates the learning rate scale according to the linear warmup decaying
-        schedule. Using this method, you can create a learning rate scheduler through
-        `LambdaLR`.
-
-        Args:
-            current_step: A current step of training.
-
-        Returns:
-            A learning rate scale corresponding to current step.
-        """
-        training_steps = self.get_total_training_steps()
-        warmup_steps = int(training_steps * self.config.train.warmup_ratio)
-
-        if current_step < warmup_steps:
-            return current_step / warmup_steps
-        return max(0, (training_steps - current_step) / (training_steps - warmup_steps))
-
-    def get_total_training_steps(self) -> int:
-        """Calculate the total training steps from the trainer.
-
-        If you are using epochs to limit training on pytorch lightning, you cannot
-        directly get the entire training steps. It requires some complicated ways to get
-        the training steps. This method uses the number of samples in the dataloader,
-        distributed devices and accumulations to get approximately correct training
-        steps.
-
-        Returns:
-            The total training steps.
-        """
-        if self.trainer.max_steps:
-            return self.trainer.max_steps
-
-        limit_batches = self.trainer.limit_train_batches
-        batches = len(self.train_dataloader())
-        batches = (
-            min(batches, limit_batches)
-            if isinstance(limit_batches, int)
-            else int(limit_batches * batches)
-        )
-
-        num_devices = max(1, self.trainer.num_gpus, self.trainer.num_processes)
-        if self.trainer.tpu_cores:
-            num_devices = max(num_devices, self.trainer.tpu_cores)
-
-        effective_accum = self.trainer.accumulate_grad_batches * num_devices
-        return (batches // effective_accum) * self.trainer.max_epochs
-
     def configure_optimizers(self) -> Tuple[List[Optimizer], List[Dict[str, Any]]]:
         optimizer = AdamW(self.create_param_groups(), **
                           self.config.train.optimizer)
         # optimizer = AdamW(self.parameters(), **self.config.train.optimizer)
         # optimizer = Adam(self.parameters())
-        scheduler = LambdaLR(optimizer, self.adjust_learning_rate)
-        return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
+        # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, self.adjust_learning_rate)
+        scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2, threshold=0.01, threshold_mode="rel")
+        # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.99)
+        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val/score"}
 
 
 class FineTuningDataModule(pl.LightningDataModule):
@@ -178,13 +141,7 @@ class FineTuningDataModule(pl.LightningDataModule):
         self.ex_dataset = ex_dataset
 
     def setup(self, stage: Optional[str] = None):
-        # fine same idx data and concat
-        # data_group = [[] for _ in range(len(self.dataset))]
-        # for data in self.dataset:
-        #     data_group[data.idx].append(data)
-        # for data in self.dataset:
-        #     data_group[data.idx].append(data.y)
-        # self.data_group = np.array(data_group)
+
         self.dataset = list(zip(self.g_dataset, self.ex_dataset))
 
         # TODO : 전부 train_dataset 으로 활용하는 방법 찾기
@@ -210,28 +167,6 @@ class FineTuningDataModule(pl.LightningDataModule):
             return self.config.data.dataloader_workers
         return os.cpu_count()
 
-    # def dataloader_collate_fn(
-    #     self, features: List[Dict[str, Union[torch.Tensor, int, str]]]
-    # ) -> Tuple[List[str], Dict[str, torch.Tensor]]:
-    #     """Simple datacollate binder for dataloaders."""
-    #     uids = [dict_['uid'] for dict_ in features]
-    #     encoding_gs = [dict_['encoding_g'] for dict_ in features]
-    #     encoding_ex = [dict_['encoding_ex'] for dict_ in features]
-    #     labels = [dict_['labels'] for dict_ in features]
-
-    #     encoding_gs = self.encoder.collate(
-    #         encoding_gs,
-    #         max_length=self.config.data.max_length,
-    #         pad_to_multiple_of=8,
-    #     )
-    #     encoding_ex = self.encoder.collate(
-    #         encoding_ex,
-    #         max_length=self.config.data.max_length,
-    #         pad_to_multiple_of=8,
-    #     )
-    #     # list of numpy to tensor
-    #     labels = torch.tensor(labels, dtype=torch.float32)
-    #     return uids, (encoding_gs, encoding_ex, labels)
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
@@ -240,6 +175,7 @@ class FineTuningDataModule(pl.LightningDataModule):
             num_workers=self.num_dataloader_workers,
             # collate_fn=self.dataloader_collate_fn,
             persistent_workers=True,
+            shuffle=True,
         )
 
     def val_dataloader(self) -> DataLoader:
