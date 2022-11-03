@@ -111,17 +111,17 @@ class MyDimenet(DimeNetPlusPlus):
         x, rbf, sbf, idx_kj, idx_ji, P, i = self.preprocess(z, pos, batch)
 
         # Interaction blocks.
-        result = []
+        result = [scatter(P, batch, dim=0)]
         for interaction_block, output_block in zip(self.interaction_blocks,
                                                    self.output_blocks[1:]):
             # x는 각 edge의 feature를 나타낸다.
             x = interaction_block(x, rbf, sbf, idx_kj, idx_ji)
             # dropout
-            x = F.dropout(x, p=0.5, training=self.training)
+            # x = F.dropout(x, p=0.5, training=self.training)
             # P += output_block(x, rbf, i)
             result.append(scatter(output_block(x, rbf, i), batch, dim=0))
         
-        return torch.cat(result, dim=-1)
+        return result #torch.cat(result, dim=-1)  # scatter(P, batch, dim=0)
 
 
 def main(config: DictConfig):
@@ -132,10 +132,10 @@ def main(config: DictConfig):
     model = MyDimenet(
         hidden_channels=128,
         out_channels=1, # 상관없음. 안쓰임.
-        num_blocks=4,
+        num_blocks=6,
         int_emb_size=64,
         basis_emb_size=8,
-        out_emb_channels=128,
+        out_emb_channels=256,
         num_spherical=7,
         num_radial=6,
         cutoff=5.0,

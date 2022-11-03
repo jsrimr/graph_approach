@@ -32,9 +32,8 @@ class FineTuningModule(pl.LightningModule):
         # self.Eg, self.Eex = models
         self.model = model
         self.mlp = nn.Sequential(
-            nn.Linear(512, 64),
-            nn.SiLU(),
-            nn.Linear(64, 2),
+            nn.Linear(256*2, 512), nn.SiLU(), nn.Dropout(0.5),
+            nn.Linear(512, 2, bias=False)
         )
 
     def forward(
@@ -43,7 +42,13 @@ class FineTuningModule(pl.LightningModule):
         g = self.model(*g_data)
         ex = self.model(*ex_data)
 
-        logits = self.mlp(torch.cat([g - ex], dim=1))  # 왜 370,128 이지?
+        # logits = self.mlp(torch.cat([g - ex], dim=1))  # g = (B,128 * 4)
+        out = []
+        for i in range(6):
+            o = self.mlp(torch.cat([g[i]+ex[i], g[i]-ex[i]], dim=1))  # g = (B,128 * 4)
+            out.append(o)
+        logits = torch.stack(out, dim=1)  # (B, 6, 2)
+        logits = torch.mean(logits, dim=1)  # (B, 2)
 
         labels = labels.view(-1, 2)  # TODO : 하드코딩 되어있음. 수정 필요.
         mse_loss = F.mse_loss(logits, labels.type_as(logits))
@@ -127,7 +132,7 @@ class FineTuningModule(pl.LightningModule):
         # optimizer = AdamW(self.parameters(), **self.config.train.optimizer)
         # optimizer = Adam(self.parameters())
         # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, self.adjust_learning_rate)
-        scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2, threshold=0.01, threshold_mode="rel")
+        scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2, threshold=0.01, min_lr=1e-6, threshold_mode="rel")
         # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.99)
         return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val/score"}
 
