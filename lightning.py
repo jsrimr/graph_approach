@@ -21,8 +21,12 @@ from dataset import FakeQM9
 
 try:
     from apex.optimizers import FusedAdam as AdamW
+    from apex.optimizers import FusedAdam as Adam
+    from apex.optimizers import FusedSGD as SGD
 except ModuleNotFoundError:
     from torch.optim import AdamW
+    from torch.optim import Adam
+    from torch.optim import SGD
 
 
 class FineTuningModule(pl.LightningModule):
@@ -31,8 +35,14 @@ class FineTuningModule(pl.LightningModule):
         self.config = config
         # self.Eg, self.Eex = models
         self.model = model
+
+        self.q = nn.Linear(128, 128)
+        self.k = nn.Linear(128, 128)
+        self.v = nn.Linear(128, 128)
+        
         self.mlp = nn.Sequential(
-            nn.Linear(256*2, 512), nn.SiLU(), nn.Dropout(0.5),
+            # nn.Linear(256*2, 512), nn.SiLU(), nn.Dropout(0.5),
+            nn.Linear(128*7, 512), nn.SiLU(), nn.Dropout(0.5),
             nn.Linear(512, 2, bias=False)
         )
 
@@ -42,13 +52,33 @@ class FineTuningModule(pl.LightningModule):
         g = self.model(*g_data)
         ex = self.model(*ex_data)
 
-        # logits = self.mlp(torch.cat([g - ex], dim=1))  # g = (B,128 * 4)
-        out = []
-        for i in range(6):
-            o = self.mlp(torch.cat([g[i]+ex[i], g[i]-ex[i]], dim=1))  # g = (B,128 * 4)
-            out.append(o)
-        logits = torch.stack(out, dim=1)  # (B, 6, 2)
-        logits = torch.mean(logits, dim=1)  # (B, 2)
+        g = torch.stack(g).transpose(0,1)  # (B, L, 128)
+        ex = torch.stack(ex).transpose(0,1) # (B, L, 128)
+        f = g - ex  # (B, L, 128)
+        # self attention
+        q_f = self.q(f)  # (B, L, 128)
+        k_f = self.k(f)  # (B, L, 128)
+        v_f = self.v(f)  # (B, L, 128)
+        attn = torch.bmm(q_f, k_f.transpose(1,2))  # (B, L, L)
+        attn = F.softmax(attn, dim=2)  # (B, L, L)
+        features = torch.bmm(attn, v_f)  # (B, L, 128)
+        features = features.view(features.size(0), -1)  # (B, 128 * L)
+        logits = self.mlp(features)  # (B, 2)
+
+        # attn = torch.bmm(g, ex.transpose(1,2))  # (B, L, L)
+        # attn = F.softmax(attn, dim=2)  # (B, L, L)
+
+        # features = torch.bmm(attn, g-ex)  # (B, L, 128)
+        # features = features.view(features.size(0), -1)  # (B, 128 * L)
+        # logits = self.mlp(features)  # (B, 2)
+
+        # out = []
+        # for i in range(6):
+        #     # g = (B,128 * 4)
+        #     o = self.mlp(torch.cat([g[i]+ex[i], g[i]-ex[i]], dim=1))
+        #     out.append(o)
+        # logits = torch.stack(out, dim=1)  # (B, 6, 2)
+        # logits = torch.mean(logits, dim=1)  # (B, 2)
 
         labels = labels.view(-1, 2)  # TODO : 하드코딩 되어있음. 수정 필요.
         mse_loss = F.mse_loss(logits, labels.type_as(logits))
@@ -86,10 +116,10 @@ class FineTuningModule(pl.LightningModule):
         return logits
 
     # def adjust_learning_rate(self, steps: int) -> float:
-        
+
     #     if steps < self.config.train.warmup_steps:
     #         return float(steps) / float(max(1, self.config.train.warmup_steps))
-        
+
     #     total_steps = self.config.train.epochs * len(self.trainer.train_dataloader())
     #     return max(
     #         0.0,
@@ -127,14 +157,20 @@ class FineTuningModule(pl.LightningModule):
         ]
 
     def configure_optimizers(self) -> Tuple[List[Optimizer], List[Dict[str, Any]]]:
-        optimizer = AdamW(self.create_param_groups(), **
-                          self.config.train.optimizer)
-        # optimizer = AdamW(self.parameters(), **self.config.train.optimizer)
+        # optimizer = AdamW(self.create_param_groups(), ** self.config.train.optimizer)
+        # SGD optimizer
+        # optimizer = SGD(self.create_param_groups(), **self.config.train.optimizer)
+        # optimizer = SGD(self.parameters(
+        # ), lr=self.config.train.optimizer.lr, nesterov=True, momentum=0.9, weight_decay=0.0001)
+        optimizer = AdamW(self.parameters())
         # optimizer = Adam(self.parameters())
         # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, self.adjust_learning_rate)
-        scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2, threshold=0.01, min_lr=1e-6, threshold_mode="rel")
+        # scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2, threshold=0.01, min_lr=1e-6, threshold_mode="rel")
         # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.99)
-        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val/score"}
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        #     optimizer, T_max=self.config.train.epochs, eta_min=1e-6)
+        # return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val/score"}
+        return {"optimizer": optimizer, "monitor": "val/score"}
 
 
 class FineTuningDataModule(pl.LightningDataModule):
@@ -171,7 +207,6 @@ class FineTuningDataModule(pl.LightningDataModule):
         if self.config.data.dataloader_workers >= 0:
             return self.config.data.dataloader_workers
         return os.cpu_count()
-
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
