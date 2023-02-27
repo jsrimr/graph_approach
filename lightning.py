@@ -30,7 +30,7 @@ except ModuleNotFoundError:
 
 
 class FineTuningModule(pl.LightningModule):
-    def __init__(self, config: DictConfig, model):
+    def __init__(self, config: DictConfig, model: nn.Module):
         super().__init__()
         self.config = config
         # self.Eg, self.Eex = models
@@ -43,11 +43,13 @@ class FineTuningModule(pl.LightningModule):
         self.mlp = nn.Sequential(
             # nn.Linear(256*2, 512), nn.SiLU(), nn.Dropout(0.5),
             nn.Linear(128*7, 512), nn.SiLU(), nn.Dropout(0.5),
-            nn.Linear(512, 2, bias=False)
+            nn.Linear(512, 256), nn.SiLU(), nn.Dropout(0.5),
+            nn.Linear(256, 64), nn.SiLU(), nn.Dropout(0.5),
+            nn.Linear(64, 2, bias=False)
         )
 
     def forward(
-        self, g_data, ex_data, labels
+        self, g_data, ex_data, labels=None, mode="train"
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         g = self.model(*g_data)
         ex = self.model(*ex_data)
@@ -65,6 +67,8 @@ class FineTuningModule(pl.LightningModule):
         features = features.view(features.size(0), -1)  # (B, 128 * L)
         logits = self.mlp(features)  # (B, 2)
 
+        if mode == "test":
+            return logits
         # attn = torch.bmm(g, ex.transpose(1,2))  # (B, L, L)
         # attn = F.softmax(attn, dim=2)  # (B, L, L)
 
@@ -81,6 +85,10 @@ class FineTuningModule(pl.LightningModule):
         # logits = torch.mean(logits, dim=1)  # (B, 2)
 
         labels = labels.view(-1, 2)  # TODO : 하드코딩 되어있음. 수정 필요.
+        # mse_loss = torch.mean((logits[:,0]- labels[:,0])**2)
+        # mae_loss = torch.mean(torch.abs(logits[:,0]- labels[:,0]))
+        # compute mse_loss and mae_loss not using torch.nn.MSELoss and torch.nn.L1Loss
+        # because of the difference of the reduction method.
         mse_loss = F.mse_loss(logits, labels.type_as(logits))
         mae_loss = F.l1_loss(logits, labels.type_as(logits))
         return mse_loss, mae_loss
@@ -108,53 +116,19 @@ class FineTuningModule(pl.LightningModule):
         self.log("val/mse_loss", mse_loss)
         self.log("val/mae_loss", mae_loss)
         self.log("val/score", mae_loss)
+        # print("val/score", mae_loss)
+
+        # log learning rate
+        for param_group in self.trainer.optimizers[0].param_groups:
+            self.log("lr", param_group['lr'])
+
 
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> Any:
         batch_g, batch_ex = batch
-        logits = self.model(*[batch_g.z, batch_g.pos, batch_g.batch], *[
-            batch_ex.z, batch_ex.pos, batch_ex.batch])
+        logits = self([batch_g.z, batch_g.pos, batch_g.batch], [
+            batch_ex.z, batch_ex.pos, batch_ex.batch], mode="test")
         return logits
 
-    # def adjust_learning_rate(self, steps: int) -> float:
-
-    #     if steps < self.config.train.warmup_steps:
-    #         return float(steps) / float(max(1, self.config.train.warmup_steps))
-
-    #     total_steps = self.config.train.epochs * len(self.trainer.train_dataloader())
-    #     return max(
-    #         0.0,
-    #         float(total_steps - steps)
-    #         / float(max(1, total_steps - self.config.train.warmup_steps)),
-    #     )
-
-    def create_param_groups(self) -> List[Dict[str, Any]]:
-        """Create parameter groups for the optimizer.
-
-        Transformer-based models are usually optimized by AdamW (weight-decay decoupled
-        Adam optimizer). And weight decaying are applied to only weight parameters, not
-        bias and layernorm parameters. Hence, this method creates parameter groups which
-        contain parameters for weight-decay and ones for non-weight-decay. Using this
-        paramter groups, you can separate which parameters should not be decayed from
-        entire parameters in this model.
-
-        Returns:
-            A list of parameter groups.
-        """
-        do_decay_params, no_decay_params = [], []
-        n_param = 0
-        for layer in self.modules():
-            for name, param in layer.named_parameters(recurse=False):
-                print(name, param.numel())
-                n_param += param.numel()
-                if name == "bias":
-                    no_decay_params.append(param)
-                else:
-                    do_decay_params.append(param)
-
-        return [
-            {"params": do_decay_params},
-            {"params": no_decay_params, "weight_decay": 0.0},
-        ]
 
     def configure_optimizers(self) -> Tuple[List[Optimizer], List[Dict[str, Any]]]:
         # optimizer = AdamW(self.create_param_groups(), ** self.config.train.optimizer)
@@ -165,12 +139,12 @@ class FineTuningModule(pl.LightningModule):
         optimizer = AdamW(self.parameters())
         # optimizer = Adam(self.parameters())
         # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, self.adjust_learning_rate)
-        # scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2, threshold=0.01, min_lr=1e-6, threshold_mode="rel")
+        scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=1, threshold=0.01, min_lr=1e-6, threshold_mode="rel")
         # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.99)
         # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         #     optimizer, T_max=self.config.train.epochs, eta_min=1e-6)
-        # return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val/score"}
-        return {"optimizer": optimizer, "monitor": "val/score"}
+        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val/score"}
+        # return {"optimizer": optimizer, "monitor": "val/score"}
 
 
 class FineTuningDataModule(pl.LightningDataModule):
@@ -189,7 +163,7 @@ class FineTuningDataModule(pl.LightningDataModule):
         # Split the structure file list into k-folds. Note that the splits will be same
         # because of the random seed fixing.
         kfold = KFold(self.config.data.num_folds,
-                      shuffle=True, random_state=42)
+                      shuffle=True, random_state=self.config.data.random_seed)
         train_val_sets = list(kfold.split(self.dataset))[
             self.config.data.fold_index]
 
@@ -221,6 +195,16 @@ class FineTuningDataModule(pl.LightningDataModule):
     def val_dataloader(self) -> DataLoader:
         return DataLoader(
             self.val_dataset,
+            batch_size=self.config.train.batch_size,
+            num_workers=self.num_dataloader_workers,
+            # collate_fn=self.dataloader_collate_fn,
+            # drop_last=True,
+            persistent_workers=True,
+        )
+    
+    def predict_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.dataset,
             batch_size=self.config.train.batch_size,
             num_workers=self.num_dataloader_workers,
             # collate_fn=self.dataloader_collate_fn,

@@ -1,11 +1,13 @@
 import argparse
 import os.path as osp
+import pandas as pd
 
 import torch
 from torch.nn import Linear, SiLU
 
 from torch_geometric.datasets import QM9
 from torch_geometric.nn.inits import glorot_orthogonal
+from tqdm import tqdm
 from dataset import ExDataset, FakeQM9, GDataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import DimeNet, DimeNetPlusPlus
@@ -102,7 +104,7 @@ class MyDimenet(DimeNetPlusPlus):
         x = self.emb(z, rbf, i, j)  # 여기서 왜 370개 노드가 4238개가 되는걸까 -> edge 개수만큼
         P = self.output_blocks[0](x, rbf, i, num_nodes=pos.size(0)) # 다시 노드개수로 압축
 
-        return x, rbf, sbf, idx_kj, idx_ji, P, i
+        return x, rbf, sbf, idx_kj, idx_ji, P, i  # ex x, P) (E=8060, 128), (N=710, 256)
 
     def forward(self, z, pos, batch, z2=None, pos2=None, batch2=None):
         # return lambda_g or lambda_e
@@ -110,7 +112,7 @@ class MyDimenet(DimeNetPlusPlus):
         # Preprocess.
         x, rbf, sbf, idx_kj, idx_ji, P, i = self.preprocess(z, pos, batch)
 
-        # Interaction blocks.
+        # Interaction blocks.  After scatter, (Graph=32, H)
         result = [scatter(P, batch, dim=0)]
         for interaction_block, output_block in zip(self.interaction_blocks,
                                                    self.output_blocks[1:]):
@@ -135,7 +137,7 @@ def main(config: DictConfig):
         num_blocks=6,
         int_emb_size=64,
         basis_emb_size=8,
-        out_emb_channels=256,
+        out_emb_channels=128,
         num_spherical=7,
         num_radial=6,
         cutoff=5.0,
@@ -149,31 +151,38 @@ def main(config: DictConfig):
     # models.append(model)
 
     model_name = f"{config.train.name}-fold{config.data.fold_index}"
-    model_checkpoint = ModelCheckpoint(
-        monitor="val/score", save_weights_only=True)
+    model_checkpoint = ModelCheckpoint(monitor="val/score", save_on_train_epoch_end=False, save_top_k=1, dirpath=f"checkpoints/{model_name}", filename="{epoch}-{val/score:.4f}")
 
-    logger=WandbLogger(project="mot-finetuning", name=model_name)
+    # logger=WandbLogger(project="mot-finetuning", name=model_name)
     # logger.watch(model, log="all", log_freq=100)
-    Trainer(
+    trainer = Trainer(
         gpus=config.train.gpus,
-        logger=logger,
-        callbacks=[model_checkpoint, LearningRateMonitor("step")],
+        # logger=logger,
+        callbacks=[model_checkpoint, LearningRateMonitor("epoch")],
         precision=config.train.precision,
         max_epochs=config.train.epochs,
         amp_backend=amp_backend,
         gradient_clip_val=config.train.max_grad_norm,
-        val_check_interval=config.train.validation_interval,
-        accumulate_grad_batches=config.train.accumulate_grads,
+        # val_check_interval=config.train.validation_interval,
+        # accumulate_grad_batches=config.train.accumulate_grads,
         # accumulate_grad_batches={0: 8, 4: 4, 8: 1},
         # resume_from_checkpoint=config.train.resume_from,
         # progress_bar_refresh_rate=1,
         log_every_n_steps=10,
-    ).fit(FineTuningModule(config, model), datamodule=FineTuningDataModule(config, g_dataset, ex_dataset))
-
-    model = FineTuningModule.load_from_checkpoint(
-        model_checkpoint.best_model_path, config=config
     )
-    torch.save(model.state_dict(), model_name + ".pth")
+    trainer.fit(FineTuningModule(config, model), datamodule=FineTuningDataModule(config, g_dataset, ex_dataset))
+
+    # model = FineTuningModule.load_from_checkpoint('checkpoints/dimenet++-fold0/epoch=1-val/score=0.2848.ckpt', config=config, model=model)
+    model = FineTuningModule.load_from_checkpoint(model_checkpoint.best_model_path, config=config, model=model)
+    model.eval()
+    
+    preds = trainer.predict(model, datamodule=FineTuningDataModule(config, GDataset(config.data.path, mode="test"), ExDataset(config.data.path, mode="test")))
+    # flatten list
+    preds = [item.cpu().numpy() for sublist in preds for item in sublist]
+    # preds = model.predictions
+    submission = pd.read_csv("sample_submission.csv")
+    submission.iloc[:, 1:] = preds
+    submission.to_csv(f"submission/{model_name}.csv", index=False)
 
 
 if __name__ == "__main__":
